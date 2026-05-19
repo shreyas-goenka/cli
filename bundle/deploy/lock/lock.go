@@ -5,7 +5,7 @@ import (
 	"fmt"
 
 	"github.com/databricks/cli/bundle"
-	"github.com/databricks/cli/bundle/env"
+	"github.com/databricks/cli/bundle/statemgmt"
 	"github.com/databricks/cli/libs/tmpdms"
 )
 
@@ -36,13 +36,12 @@ type DeploymentLock interface {
 	Release(ctx context.Context, status DeploymentStatus) error
 }
 
-// NewDeploymentLock returns a DeploymentLock implementation based on the
-// current environment. If managed state is enabled and the goal maps to a
-// supported version type, a metadata service lock is returned. Otherwise,
-// a workspace filesystem lock is returned.
+// NewDeploymentLock returns a DeploymentLock implementation based on whether
+// the bundle is DMS-active (see statemgmt.IsDmsActive). DMS-active runs get a
+// metadata-service lock; everything else falls back to the workspace
+// filesystem lock.
 func NewDeploymentLock(ctx context.Context, b *bundle.Bundle, goal Goal) DeploymentLock {
-	useManagedState, _ := env.ManagedState(ctx)
-	if useManagedState == "true" {
+	if statemgmt.IsDmsActive(ctx, b) {
 		versionType, ok := goalToVersionType(goal)
 		if ok {
 			return newMetadataServiceLock(b, versionType)

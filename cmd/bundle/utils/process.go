@@ -228,7 +228,7 @@ func ProcessBundleRet(cmd *cobra.Command, opts ProcessOptions) (b *bundle.Bundle
 			logdiag.LogError(ctx, errors.New("--plan is only supported with direct engine (set bundle.engine to \"direct\" or DATABRICKS_BUNDLE_ENGINE=direct)"))
 			return b, stateDesc, root.ErrAlreadyPrinted
 		}
-		if b.DeploymentID != "" {
+		if statemgmt.IsDmsActive(ctx, b) {
 			logdiag.LogError(ctx, errors.New("--plan is not supported with the deployment metadata service"))
 			return b, stateDesc, root.ErrAlreadyPrinted
 		}
@@ -249,7 +249,7 @@ func ProcessBundleRet(cmd *cobra.Command, opts ProcessOptions) (b *bundle.Bundle
 		// Validate that the plan's lineage and serial match the current state.
 		// When DMS is active, the server validates version ordering during lock
 		// acquisition, so local state checks are unnecessary.
-		if b.DeploymentID == "" {
+		if !statemgmt.IsDmsActive(ctx, b) {
 			err = direct.ValidatePlanAgainstState(&b.DeploymentBundle.StateDB, plan)
 			if err != nil {
 				logdiag.LogError(ctx, err)

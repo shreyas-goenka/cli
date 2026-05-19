@@ -16,7 +16,6 @@ import (
 	"github.com/databricks/cli/bundle"
 	"github.com/databricks/cli/bundle/config/engine"
 	"github.com/databricks/cli/bundle/deploy"
-	"github.com/databricks/cli/bundle/env"
 	"github.com/databricks/cli/libs/diag"
 	"github.com/databricks/cli/libs/filer"
 	"github.com/databricks/cli/libs/log"
@@ -220,15 +219,23 @@ func readStates(ctx context.Context, b *bundle.Bundle, alwaysPull AlwaysPull) []
 	directLocalState := localRead(ctx, localPathDirect, engine.EngineDirect)
 	terraformLocalState := localRead(ctx, localPathTerraform, engine.EngineTerraform)
 
-	// When DMS is enabled, read the deployment ID from workspace and return
-	// early. State is loaded from the server later via LoadStateFromDMS.
-	if useDMS, _ := env.ManagedState(ctx); useDMS == "true" {
+	// When DMS is active, read the deployment ID from managed_service.json and
+	// return early -- resource state is loaded from the server later via
+	// LoadStateFromDMS. We deliberately do not pull resources.json here: the
+	// server is authoritative for DMS-managed bundles, and resources.json is
+	// only retained as a backward-compat artifact for non-DMS deploys.
+	if IsDmsActive(ctx, b) {
 		f, err := deploy.StateFiler(b)
 		if err != nil {
 			logdiag.LogError(ctx, err)
 			return nil
 		}
-		b.DeploymentID = readDeploymentID(ctx, f)
+		deploymentID, err := readDeploymentID(ctx, f)
+		if err != nil {
+			logdiag.LogError(ctx, err)
+			return nil
+		}
+		b.DeploymentID = deploymentID
 		return nil
 	}
 
@@ -319,30 +326,30 @@ func logStatesDiag(ctx context.Context, severity diag.Severity, msg string, stat
 	})
 }
 
-// readDeploymentID reads the DMS deployment ID from the workspace
-// managed_service.json. Returns "" if the file doesn't exist or doesn't
-// contain a deployment_id.
-func readDeploymentID(ctx context.Context, f filer.Filer) string {
+// readDeploymentID reads the DMS deployment ID from workspace
+// managed_service.json. A missing file is normal (the bundle is not yet
+// DMS-managed) and produces ("", nil); any other failure -- read, JSON parse,
+// etc. -- is propagated. A corrupted managed_service.json must not silently
+// downgrade the bundle to the non-DMS code path; treating it as "missing"
+// would create a fresh deployment record and orphan the existing one.
+func readDeploymentID(ctx context.Context, f filer.Filer) (string, error) {
 	reader, err := f.Read(ctx, ManagedServiceFileName)
 	if errors.Is(err, fs.ErrNotExist) {
-		return ""
+		return "", nil
 	}
 	if err != nil {
-		log.Debugf(ctx, "Failed to read %s for deployment ID: %v", ManagedServiceFileName, err)
-		return ""
+		return "", fmt.Errorf("reading %s: %w", ManagedServiceFileName, err)
 	}
 	defer reader.Close()
 
 	data, err := io.ReadAll(reader)
 	if err != nil {
-		log.Debugf(ctx, "Failed to read %s content: %v", ManagedServiceFileName, err)
-		return ""
+		return "", fmt.Errorf("reading %s content: %w", ManagedServiceFileName, err)
 	}
 
 	var sj ManagedServiceJSON
 	if err := json.Unmarshal(data, &sj); err != nil {
-		log.Debugf(ctx, "Failed to parse %s: %v", ManagedServiceFileName, err)
-		return ""
+		return "", fmt.Errorf("parsing %s: %w", ManagedServiceFileName, err)
 	}
-	return sj.DeploymentID
+	return sj.DeploymentID, nil
 }

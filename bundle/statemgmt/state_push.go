@@ -9,7 +9,6 @@ import (
 	"github.com/databricks/cli/bundle"
 	"github.com/databricks/cli/bundle/config/engine"
 	"github.com/databricks/cli/bundle/deploy"
-	"github.com/databricks/cli/bundle/env"
 	"github.com/databricks/cli/libs/cmdio"
 	"github.com/databricks/cli/libs/filer"
 	"github.com/databricks/cli/libs/log"
@@ -22,7 +21,7 @@ import (
 func PushResourcesState(ctx context.Context, b *bundle.Bundle, engine engine.EngineType) {
 	// When DMS is active, state is persisted per-operation to the server.
 	// No local state file to push.
-	if useDMS, _ := env.ManagedState(ctx); useDMS == "true" {
+	if IsDmsActive(ctx, b) {
 		return
 	}
 
