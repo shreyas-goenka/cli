@@ -15,10 +15,11 @@ import (
 //
 //  1. The bundle already has a server-side deployment record (its deployment
 //     ID was loaded from managed_service.json during state pull), OR
-//  2. The DATABRICKS_BUNDLE_MANAGED_STATE=true env var is set, opting a
-//     not-yet-deployed bundle into DMS on its first deploy. After the first
-//     successful deploy, managed_service.json carries the bundle along and
-//     the env var is no longer required.
+//  2. DATABRICKS_BUNDLE_MANAGED_STATE is set to a truthy value (case- and
+//     spelling-tolerant via env.ManagedStateOptIn -- accepts "1", "true",
+//     "yes", "on"), opting a not-yet-deployed bundle into DMS on its first
+//     deploy. After the first successful deploy, managed_service.json
+//     carries the bundle along and the env var is no longer required.
 //
 // All gating sites that decide "do we talk to the DMS this run?" should call
 // this function. Sites that need to know "do we have a server-side deployment
@@ -30,6 +31,5 @@ func IsDmsActive(ctx context.Context, b *bundle.Bundle) bool {
 	if b.DeploymentID != "" {
 		return true
 	}
-	useDMS, _ := env.ManagedState(ctx)
-	return useDMS == "true"
+	return env.ManagedStateOptIn(ctx)
 }

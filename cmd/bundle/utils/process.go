@@ -184,7 +184,9 @@ func ProcessBundleRet(cmd *cobra.Command, opts ProcessOptions) (b *bundle.Bundle
 		cmd.SetContext(ctx)
 
 		// Open direct engine state once for all subsequent operations.
-		// When DMS is active, also load state from the server.
+		// When the bundle has a server-side deployment record, also pull resource
+		// state from the server (the envelope -- lineage/serial/cli_version --
+		// still comes from the local cache via LoadStateFromDMS).
 		needDirectState := stateDesc.Engine.IsDirect() && (opts.InitIDs || opts.ErrorOnEmptyState || opts.Deploy || opts.ReadPlanPath != "" || opts.PreDeployChecks || opts.PostStateFunc != nil)
 		if needDirectState {
 			if b.DeploymentID != "" {
