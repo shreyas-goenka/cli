@@ -10,16 +10,20 @@ import (
 	"github.com/databricks/cli/libs/tmpdms"
 )
 
-// LoadStateFromDMS loads resource state from the deployment metadata service
-// into the state DB. It first opens the local state file (which contains the
-// deployment ID pointer), then populates the resource state from the server.
+// LoadStateFromDMS populates the state DB's resource state from the deployment
+// metadata service. Lineage / serial / CLI version come from the local state
+// cache (resources.json) -- the server only stores per-resource state, not the
+// envelope. If the local cache is absent (e.g. fresh checkout of an existing
+// DMS bundle), Database defaults are used (lineage will be generated on the
+// next Finalize and persisted locally).
 func LoadStateFromDMS(ctx context.Context, b *bundle.Bundle) error {
 	if b.DeploymentID == "" {
 		return nil
 	}
 
-	// Open the local state file first so the state DB path is set.
-	// The local file contains {"deployment_id":"..."} with no resource state.
+	// Open the local state cache first so the state DB path is set. The
+	// envelope fields (lineage / serial / cli_version / state_version) come
+	// from this file -- the DMS only stores per-resource state.
 	db := &b.DeploymentBundle.StateDB
 	_, localPath := b.StateFilenameDirect(ctx)
 	if err := db.Open(localPath); err != nil {
