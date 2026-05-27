@@ -36,9 +36,53 @@ Online documentation: https://docs.databricks.com/en/dev-tools/bundles/index.htm
 	cmd.AddCommand(newSummaryCommand())
 	cmd.AddCommand(newGenerateCommand())
 	cmd.AddCommand(newDebugCommand())
-	cmd.AddCommand(deployment.NewDeploymentCommand())
 	cmd.AddCommand(newOpenCommand())
 	cmd.AddCommand(newPlanCommand())
 	cmd.AddCommand(newConfigRemoteSyncCommand())
+
+	// Bundle Metadata Service (DMS) command groups. The CRUD verbs come from
+	// the auto-generated cmd/workspace/bundle tree; we group them under the
+	// singular-noun parents and alias to the plural form for discoverability.
+	dms := metadataServiceCommands()
+
+	deploymentCmd := deployment.NewDeploymentCommand()
+	deploymentCmd.Aliases = append(deploymentCmd.Aliases, "deployments")
+	deploymentCmd.AddCommand(renameTo(dms["create-deployment"], "create"))
+	deploymentCmd.AddCommand(renameTo(dms["get-deployment"], "get"))
+	deploymentCmd.AddCommand(renameTo(dms["list-deployments"], "list"))
+	deploymentCmd.AddCommand(renameTo(dms["delete-deployment"], "delete"))
+	cmd.AddCommand(deploymentCmd)
+
+	versionCmd := &cobra.Command{
+		Use:     "version",
+		Aliases: []string{"versions"},
+		Short:   "Manage version records in the bundle metadata service.",
+	}
+	versionCmd.AddCommand(renameTo(dms["create-version"], "create"))
+	versionCmd.AddCommand(renameTo(dms["get-version"], "get"))
+	versionCmd.AddCommand(renameTo(dms["list-versions"], "list"))
+	versionCmd.AddCommand(renameTo(dms["complete-version"], "complete"))
+	versionCmd.AddCommand(renameTo(dms["heartbeat"], "heartbeat"))
+	cmd.AddCommand(versionCmd)
+
+	resourceCmd := &cobra.Command{
+		Use:     "resource",
+		Aliases: []string{"resources"},
+		Short:   "Read resource records from the bundle metadata service.",
+	}
+	resourceCmd.AddCommand(renameTo(dms["get-resource"], "get"))
+	resourceCmd.AddCommand(renameTo(dms["list-resources"], "list"))
+	cmd.AddCommand(resourceCmd)
+
+	operationCmd := &cobra.Command{
+		Use:     "operation",
+		Aliases: []string{"operations"},
+		Short:   "Manage operation records in the bundle metadata service.",
+	}
+	operationCmd.AddCommand(renameTo(dms["create-operation"], "create"))
+	operationCmd.AddCommand(renameTo(dms["get-operation"], "get"))
+	operationCmd.AddCommand(renameTo(dms["list-operations"], "list"))
+	cmd.AddCommand(operationCmd)
+
 	return cmd
 }
