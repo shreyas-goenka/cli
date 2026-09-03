@@ -1,0 +1,24 @@
+
+=== record_deployment_history is rejected: the service side is not ready for users yet
+>>> musterr [CLI] bundle validate
+Error: experimental.record_deployment_history is not supported yet; remove this setting from your bundle configuration
+  at experimental.record_deployment_history
+  in databricks.yml:4:30
+
+Name: dms-not-supported-[UNIQUE_NAME]
+Target: default
+Workspace:
+  User: [USERNAME]
+  Path: /Workspace/Users/[USERNAME]/.bundle/dms-not-supported-[UNIQUE_NAME]/default
+
+Found 1 error
+
+=== The hidden recording variable permits it
+>>> DATABRICKS_BUNDLE_RECORD_DEPLOYMENT_HISTORY=true [CLI] bundle validate
+Name: dms-not-supported-[UNIQUE_NAME]
+Target: default
+Workspace:
+  User: [USERNAME]
+  Path: /Workspace/Users/[USERNAME]/.bundle/dms-not-supported-[UNIQUE_NAME]/default
+
+Validation OK!

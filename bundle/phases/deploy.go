@@ -26,9 +26,11 @@ import (
 	"github.com/databricks/cli/bundle/statemgmt"
 	"github.com/databricks/cli/libs/agent"
 	"github.com/databricks/cli/libs/cmdio"
+	"github.com/databricks/cli/libs/dms"
 	"github.com/databricks/cli/libs/log"
 	"github.com/databricks/cli/libs/logdiag"
 	"github.com/databricks/cli/libs/sync"
+	"github.com/databricks/databricks-sdk-go/service/bundledeployments"
 )
 
 var deployApprovalGroups = []approvalGroup{
@@ -110,7 +112,8 @@ func deployCore(ctx context.Context, b *bundle.Bundle, plan *deployplan.Plan, st
 		return
 	}
 
-	bundle.ApplySeqContext(ctx, b,
+	bundle.ApplySeqContext(
+		ctx, b,
 		statemgmt.Load(state),
 		metadata.Compute(),
 		metadata.Upload(),
@@ -168,7 +171,8 @@ func logDeploySummary(ctx context.Context, b *bundle.Bundle, plan *deployplan.Pl
 // It also cleans up the artifacts directory and transforms wheel tasks.
 // It is called by only "bundle deploy".
 func uploadLibraries(ctx context.Context, b *bundle.Bundle, libs map[string][]libraries.LocationToUpdate) {
-	bundle.ApplySeqContext(ctx, b,
+	bundle.ApplySeqContext(
+		ctx, b,
 		artifacts.CleanUp(),
 		libraries.Upload(libs),
 	)
@@ -179,12 +183,13 @@ func uploadLibraries(ctx context.Context, b *bundle.Bundle, libs map[string][]li
 // stateEngine is the engine the resolved state file uses; requestedEngine is
 // what bundle.engine / DATABRICKS_BUNDLE_ENGINE asked for and may differ (used
 // only by the post-deploy migration check).
-func Deploy(ctx context.Context, b *bundle.Bundle, outputHandler sync.OutputHandler, stateEngine engine.EngineType, requestedEngine engine.EngineSetting, libs map[string][]libraries.LocationToUpdate, plan *deployplan.Plan) {
+func Deploy(ctx context.Context, b *bundle.Bundle, outputHandler sync.OutputHandler, stateEngine engine.EngineType, requestedEngine engine.EngineSetting, libs map[string][]libraries.LocationToUpdate, plan *deployplan.Plan, dmsDeployment *bundledeployments.Deployment) {
 	log.Info(ctx, "Phase: deploy")
 
 	// Core mutators that CRUD resources and modify deployment state. These
 	// mutators need informed consent if they are potentially destructive.
-	bundle.ApplySeqContext(ctx, b,
+	bundle.ApplySeqContext(
+		ctx, b,
 		scripts.Execute(config.ScriptPreDeploy),
 		lock.Acquire(lock.GoalDeploy),
 	)
@@ -195,7 +200,13 @@ func Deploy(ctx context.Context, b *bundle.Bundle, outputHandler sync.OutputHand
 	}
 
 	// lock is acquired here
+	//
+	// The version is created only after approval; CompleteVersion is deferred before
+	// lock.Release and no-ops until then.
 	defer func() {
+		if _, err := drainOperationsAndCompleteVersion(ctx, b, !logdiag.HasError(ctx)); err != nil {
+			logdiag.LogError(ctx, err)
+		}
 		bundle.ApplyContext(ctx, b, lock.Release(lock.GoalDeploy))
 	}()
 
@@ -209,7 +220,8 @@ func Deploy(ctx context.Context, b *bundle.Bundle, outputHandler sync.OutputHand
 		// Upload all source files and built artifacts as a single immutable snapshot.
 		// snapshot.Upload() sets workspace.snapshot_path; the variable-resolution
 		// pass expands ${workspace.snapshot_path} placeholders written by translate_paths.
-		bundle.ApplySeqContext(ctx, b,
+		bundle.ApplySeqContext(
+			ctx, b,
 			snapshot.Upload(),
 			mutator.ResolveVariableReferencesOnlyResources("workspace"),
 		)
@@ -246,7 +258,8 @@ func Deploy(ctx context.Context, b *bundle.Bundle, outputHandler sync.OutputHand
 		}
 	}()
 
-	bundle.ApplySeqContext(ctx, b,
+	bundle.ApplySeqContext(
+		ctx, b,
 		deploy.StateUpdate(),
 		deploy.StatePush(),
 		permissions.ApplyWorkspaceRootPermissions(),
@@ -259,6 +272,24 @@ func Deploy(ctx context.Context, b *bundle.Bundle, outputHandler sync.OutputHand
 	}
 
 	planFromFile := plan != nil
+	if b.DeploymentBundle.DmsApiClient != nil {
+		// Create the deployment before planning so it exists to stamp.
+		createOrUpdateDeployment(ctx, b, dmsDeployment)
+		if logdiag.HasError(ctx) {
+			return
+		}
+		// version_id is annotated at plan time. Once the deployment exists, stamp its id onto the
+		// config so RunPlan carries it into the plan; the id is unknown at plan time for a first
+		// deploy, so this is where a first deploy picks it up.
+		if !planFromFile {
+			deploymentID, _ := deploymentAndNextVersion(b)
+			bundle.ApplySeqContext(ctx, b, metadata.AnnotateDeployment(deploymentID))
+			if logdiag.HasError(ctx) {
+				return
+			}
+		}
+	}
+
 	if plan == nil {
 		// State is already open for read by process.go (for direct engine)
 		plan = RunPlan(ctx, b, stateEngine)
@@ -280,8 +311,10 @@ func Deploy(ctx context.Context, b *bundle.Bundle, outputHandler sync.OutputHand
 	}
 
 	if planFromFile {
-		// Initialize DeploymentBundle for applying the loaded plan
-		err := b.DeploymentBundle.InitForApply(ctx, b.WorkspaceClient(ctx), plan)
+		// The loaded plan already carries the stamps, except a first deploy's deployment id, which
+		// does not exist until now; InitForApply fills that in. Non-recording deploys pass "".
+		deploymentID, _ := deploymentAndNextVersion(b)
+		err := b.DeploymentBundle.InitForApply(ctx, b.WorkspaceClient(ctx), plan, deploymentID)
 		if err != nil {
 			logdiag.LogError(ctx, err)
 			return
@@ -295,17 +328,35 @@ func Deploy(ctx context.Context, b *bundle.Bundle, outputHandler sync.OutputHand
 		return
 	}
 
-	haveApproval, err := approvalForDeploy(ctx, b, plan)
+	haveApproval, approvalErr := approvalForDeploy(ctx, b, plan)
+	if !haveApproval {
+		// No version was created, so the deferred CompleteVersion is a no-op and the version
+		// number is left for the next deploy. Both the user declining and a console that
+		// cannot prompt land here.
+		if approvalErr != nil {
+			logdiag.LogError(ctx, approvalErr)
+			return
+		}
+		cmdio.LogString(ctx, "Deployment cancelled!")
+		return
+	}
+
+	// Create the version the plan was stamped with, staging an operation for every resource
+	// it touches. Doing it here rather than before the prompt means a declined deploy never
+	// claims a version number.
+	staged, err := stagedOperations(plan)
 	if err != nil {
 		logdiag.LogError(ctx, err)
 		return
 	}
-	if haveApproval {
-		deployCore(ctx, b, plan, stateEngine)
-	} else {
-		cmdio.LogString(ctx, "Deployment cancelled!")
+	if err := startVersion(ctx, b, dms.VersionTypeDeploy, staged); err != nil {
+		logdiag.LogError(ctx, err)
 		return
 	}
+	deploymentID, versionID := deploymentAndNextVersion(b)
+	logDeploymentVersion(ctx, b, deploymentID, versionID)
+
+	deployCore(ctx, b, plan, stateEngine)
 
 	if logdiag.HasError(ctx) {
 		return
@@ -358,7 +409,8 @@ func RunPlan(ctx context.Context, b *bundle.Bundle, engine engine.EngineType) *d
 	// b.Select is rejected for the terraform engine in ProcessBundleRet, so it is
 	// never set here.
 
-	bundle.ApplySeqContext(ctx, b,
+	bundle.ApplySeqContext(
+		ctx, b,
 		terraform.Interpolate(),
 		terraform.Write(),
 		terraform.Plan(terraform.PlanGoal("deploy")),

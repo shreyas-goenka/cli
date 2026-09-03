@@ -8,6 +8,7 @@ import (
 	"maps"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/databricks/cli/bundle/config"
@@ -15,6 +16,7 @@ import (
 	"github.com/databricks/cli/bundle/direct/dresources"
 	"github.com/databricks/cli/bundle/direct/dstate"
 	"github.com/databricks/cli/bundle/terraform_dabs_map"
+	"github.com/databricks/cli/libs/dms"
 	"github.com/databricks/cli/libs/dyn"
 	"github.com/databricks/cli/libs/dyn/dynvar"
 	"github.com/databricks/cli/libs/log"
@@ -25,6 +27,7 @@ import (
 	"github.com/databricks/cli/libs/structs/structvar"
 	"github.com/databricks/databricks-sdk-go"
 	"github.com/databricks/databricks-sdk-go/apierr"
+	"github.com/databricks/databricks-sdk-go/service/jobs"
 )
 
 var errDelayed = errors.New("must be resolved after apply")
@@ -58,9 +61,11 @@ func ValidatePlanAgainstState(stateDB *dstate.DeploymentState, plan *deployplan.
 	return nil
 }
 
-// InitForApply initializes the DeploymentBundle for applying a pre-computed plan.
+// InitForApply initializes the DeploymentBundle for applying a pre-computed plan. The plan already
+// carries the deployment stamp, except a first deployment's id, which does not exist until deploy: a
+// non-empty deploymentID fills it in on any job/pipeline whose loaded entry still lacks one.
 // StateDB must already be open for write before calling this function.
-func (b *DeploymentBundle) InitForApply(ctx context.Context, client *databricks.WorkspaceClient, plan *deployplan.Plan) error {
+func (b *DeploymentBundle) InitForApply(ctx context.Context, client *databricks.WorkspaceClient, plan *deployplan.Plan, deploymentID string) error {
 	b.StateDB.AssertOpenedForWrite()
 
 	err := b.init(client)
@@ -90,6 +95,28 @@ func (b *DeploymentBundle) InitForApply(ctx context.Context, client *databricks.
 			sv, err := entry.NewState.ToStructVar(adapter.StateType())
 			if err != nil {
 				return fmt.Errorf("loading plan entry %s: %w", resourceKey, err)
+			}
+			// Fill in a first deploy's deployment id (see InitForApply doc) on entries that still
+			// lack one; the version and non-first ids are already in the plan.
+			if deploymentID != "" {
+				var stamped bool
+				switch v := sv.Value.(type) {
+				case *jobs.JobSettings:
+					if v.Deployment.DeploymentId == "" {
+						v.Deployment.DeploymentId = deploymentID
+						stamped = true
+					}
+				case *dresources.PipelineState:
+					if v.Deployment.DeploymentId == "" {
+						v.Deployment.DeploymentId = deploymentID
+						stamped = true
+					}
+				}
+				if stamped {
+					if err := sv.SyncToJSON(entry.NewState); err != nil {
+						return fmt.Errorf("%s: stamping deployment into loaded plan: %w", resourceKey, err)
+					}
+				}
 			}
 			b.StateCache.Store(resourceKey, sv)
 		}
@@ -126,6 +153,21 @@ func (b *DeploymentBundle) CalculatePlan(ctx context.Context, client *databricks
 	plan, err := b.makePlan(ctx, configRoot, &b.StateDB.Data)
 	if err != nil {
 		return nil, fmt.Errorf("reading config: %w", err)
+	}
+
+	// Record the DMS deployment and version this plan targets. A saved plan carries them so
+	// deploy --plan can reject a plan the deployment has moved on from, and pass last_version_id
+	// as previous_version_id. History is set only while recording, so other plans leave these empty.
+	// configRoot is nil for destroy, which records its version separately.
+	if configRoot != nil && configRoot.Bundle.Deployment.History != nil {
+		h := configRoot.Bundle.Deployment.History
+		next, err := dms.NextVersion(h.LatestVersionID)
+		if err != nil {
+			return nil, fmt.Errorf("computing next deployment version: %w", err)
+		}
+		plan.DeploymentId = h.DeploymentID
+		plan.LastVersionId = h.LatestVersionID
+		plan.NextVersionId = strconv.FormatInt(next, 10)
 	}
 
 	b.Plan = plan
